@@ -1,0 +1,83 @@
+.nightscout-bg {
+    background: #181a1b;
+    color: #fff;
+    padding: 2rem;
+    border-radius: 12px;
+    max-width: 700px;
+    margin: 2rem auto;
+    box-shadow: 0 2px 16px #000a;
+}
+.nightscout-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    margin-bottom: 1.5rem;
+}
+.nightscout-time {
+    font-size: 2.5rem;
+    font-weight: bold;
+    margin-right: 1rem;
+}
+.nightscout-battery {
+    background: #333;
+    color: #fff;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 1rem;
+    margin-left: 0.5rem;
+}
+.nightscout-glucose {
+    font-size: 3.5rem;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+}
+.nightscout-glucose-value {
+    font-size: 3.5rem;
+    margin-right: 0.5rem;
+}
+.nightscout-trend {
+    font-size: 2.5rem;
+    font-weight: bold;
+}
+.nightscout-extra {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    font-size: 1.1rem;
+    gap: 0.2rem;
+}
+.nightscout-delta {
+    background: #222;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+}
+.nightscout-iob, .nightscout-cob {
+    background: #333;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+    margin-top: 0.1rem;
+}
+.nightscout-back {
+    margin-bottom: 1rem;
+    background: #222;
+    color: #fff;
+    border: none;
+    padding: 0.5rem 1.2rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 1rem;
+    margin-top: 1rem;
+}
+.nightscout-chart-container {
+    width: 100%;
+    height: 300px;
+    margin-top: 1rem;
+}
+.nightscout-chart-container canvas {
+    width: 100% !important;
+    height: 100% !important;
+    background: #181a1b;
+    border-radius: 8px;
+    display: block;
+}

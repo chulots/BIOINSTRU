@@ -1,0 +1,74 @@
+/* Contenedor principal que ocupa toda la pantalla */
+body, html {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+#root {
+  height: 100%;
+}
+
+.inicio-centrado {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background: #f0f4f8;
+}
+
+/* Caja que contiene los datos */
+.inicio-container {
+  width: 100%;
+  max-width: 700px;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.08);
+  padding: 32px;
+  font-family: 'Segoe UI', sans-serif;
+}
+
+.inicio-titulo {
+  text-align: center;
+  color: #007bff;
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.inicio-subtitulo {
+  text-align: center;
+  color: #555;
+  margin-bottom: 24px;
+}
+
+.datos-usuario {
+  background-color: #f9f9f9;
+  padding: 20px;
+  border-radius: 8px;
+  line-height: 1.8;
+  font-size: 1rem;
+  color: #333;
+}
+
+.botones-navegacion {
+  margin-top: 40px;
+  display: flex;
+  justify-content: space-around;
+  flex-wrap: wrap;
+}
+
+.boton {
+  padding: 10px 20px;
+  background-color: #007bff;
+  border: none;
+  border-radius: 8px;
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+  margin: 5px;
+  transition: background-color 0.3s;
+}
+
+.boton:hover {
+  background-color: #0056b3;
+}
