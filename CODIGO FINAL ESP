@@ -1,0 +1,462 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+
+// ===== CONFIGURACION WI-FI =====
+const char* ssid = "Mio";
+const char* password = "1234567890";
+const char* serverUrl = "http://192.168.100.66/oximetro/recibir.php";
+
+// ===== PINES PERSONALIZADOS PARA ESP32-C3 =====
+#define SCL_PIN 9
+#define SDA_PIN 8
+#define PULSADOR_GO_PIN 20
+#define LED_INTERNO_PIN 2
+
+// ===== SENSOR =====
+MAX30105 particleSensor;
+
+// ===== VARIABLES DE DATOS =====
+String var_mode = "AUTO";
+float var_spo2 = 0.0;
+float var_lpm = 0.0;
+int var_alarma_estadoSonda = 0;
+int var_alarma_SpO2 = 0;
+int var_alarma_LPM = 0;
+
+// ===== MODO AUTOMATICO =====
+bool modo_automatico = true;
+const unsigned long INTERVALO_AUTO_MS = 90000; // 90 segundos
+unsigned long ultima_medicion_auto = 0;
+
+// ===== TIEMPOS =====
+unsigned long lastPulseTime = 0;
+const unsigned long SENSOR_TIMEOUT_MS = 10000;
+unsigned long lastPlot = 0;
+unsigned long lastLedUpdate = 0;
+const unsigned long INTERVALO_PLOT = 100;
+const unsigned long INTERVALO_LED = 200;
+
+// ===== VARIABLES PARA HEART RATE =====
+const byte RATE_SIZE = 4;
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute = 0;
+float avereageBeatsPerMinute = 0;
+
+// ===== FIFO para SpO2 =====
+const byte BUFFER_SIZE = 100;
+uint16_t redBuffer[BUFFER_SIZE];
+uint16_t irBuffer[BUFFER_SIZE];
+byte bufferIndex = 0;
+
+// ===== FILTRADO DE DATOS =====
+const byte MEDIDAS_PARA_FILTRO = 10;
+float spo2_acumuladas[MEDIDAS_PARA_FILTRO];
+float bpm_acumuladas[MEDIDAS_PARA_FILTRO];
+byte contador_medidas = 0;
+
+// ===== ESTADO DE LA PRUEBA =====
+bool prueba_activa = false;
+unsigned long tiempo_inicio_prueba = 0;
+
+// ===== ESTADO DEL LED =====
+bool led_encendido = false;
+int estado_led = 0;
+
+// ===== INICIALIZACION I2C =====
+TwoWire I2C = TwoWire(0);
+
+// ===== FUNCIONES LED =====
+void setLedApagado() {
+  digitalWrite(LED_INTERNO_PIN, LOW);
+  estado_led = 0;
+}
+
+void setLedParpadeo() {
+  if (millis() - lastLedUpdate >= INTERVALO_LED) {
+    led_encendido = !led_encendido;
+    digitalWrite(LED_INTERNO_PIN, led_encendido ? HIGH : LOW);
+    lastLedUpdate = millis();
+  }
+  estado_led = 1;
+}
+
+void setLedEncendido() {
+  digitalWrite(LED_INTERNO_PIN, HIGH);
+  estado_led = 2;
+}
+
+// ===== FUNCION WIFI =====
+void initWiFi() {
+  Serial.print("Conectando a ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  int retryCount = 0;
+
+  while (WiFi.status() != WL_CONNECTED && retryCount < 20) {
+    delay(500);
+    Serial.print(".");
+    retryCount++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWi-Fi conectado");
+    Serial.print("Direccion IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nError de conexion Wi-Fi");
+  }
+}
+
+// ===== FUNCION SENSOR =====
+void initMax30102() {
+  Serial.println("Inicializando I2C...");
+  I2C.begin(SDA_PIN, SCL_PIN, 100000);
+  delay(500);
+  
+  Serial.println("Buscando MAX30102...");
+  if (!particleSensor.begin(I2C, I2C_SPEED_FAST)) {
+    Serial.println("ERROR: MAX30102 no detectado");
+    Serial.println("Verifica:");
+    Serial.println("  - Conexion SDA en GPIO8");
+    Serial.println("  - Conexion SCL en GPIO9");
+    Serial.println("  - Pull-ups de 4.7k");
+    while (1) {
+      delay(1000);
+      Serial.println("Reintentando...");
+    }
+  }
+
+  Serial.println("MAX30102 encontrado");
+  
+  particleSensor.setup(5, 4, 2, 400, 4096);
+  particleSensor.setPulseAmplitudeRed(0x1F);
+  particleSensor.setPulseAmplitudeIR(0x1F);
+  particleSensor.setPulseAmplitudeGreen(0x00);
+  
+  Serial.println("MAX30102 configurado (amplitud: 0x1F)");
+}
+
+// ===== CALCULAR ALARMAS =====
+void calcularAlarmas() {
+  // Alarmas de SpO2
+  if (var_spo2 < 85) var_alarma_SpO2 = 3; // Severa
+  else if (var_spo2 < 90) var_alarma_SpO2 = 2; // Moderada
+  else if (var_spo2 < 95) var_alarma_SpO2 = 1; // Leve
+  else var_alarma_SpO2 = 0; // Normal
+
+  // Alarmas de LPM
+  if (var_lpm < 40) var_alarma_LPM = 1; // Bradicardia severa
+  else if (var_lpm < 50) var_alarma_LPM = 2; // Bradicardia leve
+  else if (var_lpm >= 120) var_alarma_LPM = 4; // Taquicardia severa
+  else if (var_lpm >= 100) var_alarma_LPM = 3; // Taquicardia leve
+  else var_alarma_LPM = 0; // Normal
+}
+
+// ===== ENVIAR DATOS HTTP =====
+void sendData() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverUrl);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+    String postData = "spo2=" + String(var_spo2, 2) + 
+                      "&lpm=" + String(var_lpm, 2) + 
+                      "&sonda=" + String(var_alarma_estadoSonda) + 
+                      "&alarSPO2=" + String(var_alarma_SpO2) + 
+                      "&alarLPM=" + String(var_alarma_LPM);
+
+    int httpResponseCode = http.POST(postData);
+
+    if (httpResponseCode > 0) {
+      Serial.printf("[HTTP] POST codigo: %d\n", httpResponseCode);
+      String response = http.getString();
+      Serial.println("Respuesta: " + response);
+    } else {
+      Serial.printf("[HTTP] POST fallo, codigo: %d\n", httpResponseCode);
+    }
+    http.end();
+  } else {
+    Serial.println("Wi-Fi no conectado");
+  }
+}
+
+void plotearDatos() {
+  if (!prueba_activa) return;
+  
+  Serial.print("SpO2:");
+  Serial.print(var_spo2, 1);
+  Serial.print(",");
+  Serial.print("BPM:");
+  Serial.print(var_lpm, 1);
+  Serial.print(",");
+  Serial.print("Contador:");
+  Serial.println(contador_medidas);
+}
+
+void acumularMedida(float spo2, float bpm) {
+  spo2_acumuladas[contador_medidas] = spo2;
+  bpm_acumuladas[contador_medidas] = bpm;
+  contador_medidas++;
+  
+  Serial.print("[");
+  Serial.print(contador_medidas);
+  Serial.print("/");
+  Serial.print(MEDIDAS_PARA_FILTRO);
+  Serial.print("] SpO2:");
+  Serial.print(spo2, 1);
+  Serial.print("% BPM:");
+  Serial.println(bpm, 1);
+}
+
+void calcularPromediaYEnviar() {
+  float spo2_suma = 0;
+  for (byte i = 0; i < MEDIDAS_PARA_FILTRO; i++) {
+    spo2_suma += spo2_acumuladas[i];
+  }
+  var_spo2 = spo2_suma / MEDIDAS_PARA_FILTRO;
+  
+  float bpm_suma = 0;
+  for (byte i = 0; i < MEDIDAS_PARA_FILTRO; i++) {
+    bpm_suma += bpm_acumuladas[i];
+  }
+  var_lpm = bpm_suma / MEDIDAS_PARA_FILTRO;
+  
+  // Calcular alarmas usando el sistema original
+  calcularAlarmas();
+  
+  enviarResultadoFinal();
+  
+  // Enviar datos por HTTP
+  sendData();
+  
+  contador_medidas = 0;
+  prueba_activa = false;
+  
+  // Actualizar tiempo de ultima medicion automatica
+  ultima_medicion_auto = millis();
+  
+  // LED ENCENDIDO para indicar que el resultado esta listo
+  setLedEncendido();
+}
+
+void enviarResultadoFinal() {
+  Serial.println("\n════════════════════════════════════");
+  Serial.println("     RESULTADO FINAL FILTRADO       ");
+  Serial.println("════════════════════════════════════");
+  Serial.print("SpO2:");
+  Serial.print(var_spo2, 2);
+  Serial.print("% | BPM:");
+  Serial.print(var_lpm, 1);
+  Serial.print(" | Sonda:");
+  Serial.print(var_alarma_estadoSonda);
+  Serial.print(" | Alarma SpO2:");
+  Serial.print(var_alarma_SpO2);
+  Serial.print(" | Alarma LPM:");
+  Serial.println(var_alarma_LPM);
+  Serial.println("════════════════════════════════════");
+  
+  if (modo_automatico) {
+    Serial.print("Proxima medicion automatica en: ");
+    Serial.print(INTERVALO_AUTO_MS / 1000);
+    Serial.println(" segundos");
+  } else {
+    Serial.println("Presiona el boton para hacer otra prueba");
+  }
+  Serial.println();
+}
+
+float calcularSpO2() {
+  long redSum = 0, irSum = 0;
+  for (byte i = 0; i < BUFFER_SIZE; i++) {
+    redSum += redBuffer[i];
+    irSum += irBuffer[i];
+  }
+  
+  float ratio = (float)redSum / irSum;
+  float spo2 = 110.0 - (25.0 * ratio);
+  
+  if (spo2 < 70) spo2 = 70;
+  if (spo2 > 100) spo2 = 100;
+  
+  return spo2;
+}
+
+void iniciarPrueba(bool es_automatica) {
+  Serial.println("\n════════════════════════════════════");
+  if (es_automatica) {
+    Serial.println("  MEDICION AUTOMATICA INICIADA      ");
+  } else {
+    Serial.println("    INICIANDO PRUEBA DE MEDICION    ");
+  }
+  Serial.println(" Realiza 10 medidas continuadas...  ");
+  Serial.println(" LED: PARPADEO = Leyendo            ");
+  Serial.println("════════════════════════════════════\n");
+  
+  prueba_activa = true;
+  contador_medidas = 0;
+  tiempo_inicio_prueba = millis();
+  
+  // LED PARPADEA para indicar lectura
+  setLedParpadeo();
+}
+
+void verificarBoton() {
+  static unsigned long ultimo_tiempo_boton = 0;
+  static bool boton_presionado_anterior = false;
+  
+  bool boton_actual = (digitalRead(PULSADOR_GO_PIN) == LOW);
+  
+  // Presion del boton (flanco descendente con debounce)
+  if (boton_actual && !boton_presionado_anterior && (millis() - ultimo_tiempo_boton > 500)) {
+    iniciarPrueba(false);
+    ultimo_tiempo_boton = millis();
+  }
+  
+  boton_presionado_anterior = boton_actual;
+}
+
+void verificarMedicionAutomatica() {
+  if (!modo_automatico) return;
+  if (prueba_activa) return;
+  
+  // Verificar si es tiempo de hacer una medicion automatica
+  if (millis() - ultima_medicion_auto >= INTERVALO_AUTO_MS) {
+    iniciarPrueba(true);
+  }
+}
+
+void setup() {
+  delay(2000);
+  Serial.begin(115200);
+  delay(1000);
+  
+  while (Serial.available()) {
+    Serial.read();
+  }
+
+  Serial.println("\n\n");
+  Serial.println("════════════════════════════════════");
+  Serial.println("  OXIMETRO ESP32-C3 SUPERMINI v11.0 ");
+  Serial.println("  CON WIFI Y MODO AUTOMATICO        ");
+  Serial.println("════════════════════════════════════");
+  Serial.println("");
+  Serial.println("Configuracion de pines:");
+  Serial.println("  I2C SDA: GPIO8 (MAX30102)");
+  Serial.println("  I2C SCL: GPIO9 (MAX30102)");
+  Serial.println("  Boton:   GPIO20");
+  Serial.println("  LED INTERNO: GPIO2 (Digital)");
+  Serial.println("");
+  Serial.println("Estados del LED Interno:");
+  Serial.println("  APAGADO:    Esperando medicion");
+  Serial.println("  PARPADEO:   Leyendo datos");
+  Serial.println("  ENCENDIDO:  Resultado listo");
+  Serial.println("");
+  Serial.println("Modo de operacion:");
+  Serial.print("  AUTOMATICO: ");
+  Serial.println(modo_automatico ? "ACTIVADO" : "DESACTIVADO");
+  Serial.print("  Intervalo: ");
+  Serial.print(INTERVALO_AUTO_MS / 1000);
+  Serial.println(" segundos");
+  Serial.println("");
+  
+  pinMode(LED_INTERNO_PIN, OUTPUT);
+  pinMode(PULSADOR_GO_PIN, INPUT_PULLUP);
+  
+  // Inicializar LED en APAGADO (espera)
+  setLedApagado();
+  
+  Serial.println("Inicializando sensor MAX30102...");
+  initMax30102();
+
+  Serial.println("");
+  Serial.println("Inicializando Wi-Fi...");
+  initWiFi();
+
+  Serial.println("");
+  Serial.println("SISTEMA LISTO");
+  Serial.println("Coloca tu DEDO en el sensor");
+  Serial.println("Presiona el boton para medicion manual");
+  Serial.println("Mediciones automaticas cada 90 segundos");
+  Serial.println("LED Interno indica estado");
+  Serial.println("");
+  
+  // Inicializar tiempo de ultima medicion
+  ultima_medicion_auto = millis();
+}
+
+void loop() {
+  // Verificar boton SIEMPRE (medicion manual)
+  verificarBoton();
+  
+  // Verificar si es momento de medicion automatica
+  verificarMedicionAutomatica();
+  
+  // Si NO hay prueba activa, LED APAGADO (espera)
+  if (!prueba_activa) {
+    setLedApagado();
+    delay(100);
+    return;
+  }
+  
+  // Si hay prueba activa, actualizar LED parpadeo
+  setLedParpadeo();
+  
+  long redValue = particleSensor.getRed();
+  long irValue = particleSensor.getIR();
+
+  redBuffer[bufferIndex] = redValue;
+  irBuffer[bufferIndex] = irValue;
+  bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
+
+  if (checkForBeat(irValue)) {
+    long delta = millis() - lastBeat;
+    lastBeat = millis();
+
+    beatsPerMinute = 60 / (delta / 1000.0);
+    
+    if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+      rates[rateSpot++] = (byte)beatsPerMinute;
+      rateSpot %= RATE_SIZE;
+
+      avereageBeatsPerMinute = 0;
+      for (byte x = 0; x < RATE_SIZE; x++)
+        avereageBeatsPerMinute += rates[x];
+      avereageBeatsPerMinute /= RATE_SIZE;
+
+      var_lpm = avereageBeatsPerMinute;
+      var_spo2 = calcularSpO2();
+      var_alarma_estadoSonda = 0;
+      
+      var_alarma_SpO2 = (var_spo2 < 90) ? 1 : 0;
+      var_alarma_LPM = (var_lpm < 60 || var_lpm > 100) ? 1 : 0;
+      
+      lastPulseTime = millis();
+      
+      if (contador_medidas < MEDIDAS_PARA_FILTRO) {
+        acumularMedida(var_spo2, var_lpm);
+      }
+      
+      if (contador_medidas >= MEDIDAS_PARA_FILTRO) {
+        calcularPromediaYEnviar();
+      }
+    }
+  }
+
+  if (millis() - lastPulseTime > SENSOR_TIMEOUT_MS) {
+    var_alarma_estadoSonda = 1;
+    var_spo2 = 0;
+    var_lpm = 0;
+  }
+
+  if (millis() - lastPlot >= INTERVALO_PLOT) {
+    plotearDatos();
+    lastPlot = millis();
+  }
+
+  delay(10);
+}
